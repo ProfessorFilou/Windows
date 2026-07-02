@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Windows</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #000;
+    color: white;
+    overflow: hidden;
+    cursor: none;
+  }
+  #bsod {
+    display: none;
+    width: 100vw; height: 100vh;
+    background: #0a3b8c;
+    position: fixed; top: 0; left: 0;
+    z-index: 10;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 80px 100px;
+  }
+  #bsod .emoji { font-size: 110px; margin-bottom: 36px; display: block; line-height: 1; }
+  #bsod h1 { font-size: 34px; font-weight: 300; margin-bottom: 28px; line-height: 1.4; }
+  #bsod p { font-size: 16px; opacity: 0.85; max-width: 580px; line-height: 1.85; margin-bottom: 10px; }
+  #stop-code { margin-top: 10px; font-size: 14px; opacity: 0.6; }
+  #stop-code strong { opacity: 1; color: white; }
+  #progress-label { margin-top: 48px; font-size: 16px; opacity: 0.9; }
+  #progress-bar-wrap { margin-top: 14px; width: 240px; height: 5px; background: rgba(255,255,255,0.18); border-radius: 3px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: white; border-radius: 3px; }
+
+  #blackscreen { display: none; position: fixed; inset: 0; background: #000; z-index: 20; }
+
+  #boot-screen {
+    display: none;
+    position: fixed; inset: 0;
+    background: #000;
+    z-index: 30;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 56px;
+  }
+  .win11-logo {
+    position: relative; width: 80px; height: 80px;
+    opacity: 0; transform: scale(0.9);
+    transition: opacity 0.55s ease, transform 0.55s ease;
+  }
+  .win11-logo.show { opacity: 1; transform: scale(1); }
+  .logo-grid {
+    width: 80px; height: 80px; position: relative;
+    background: linear-gradient(135deg, #5de0f5 0%, #38b6f0 18%, #2196e8 38%, #1a7fe0 55%, #1565d8 72%, #1050c8 88%, #0d3fb8 100%);
+    border-radius: 16px;
+  }
+  .logo-grid::before, .logo-grid::after { content: ''; position: absolute; background: #000; }
+  .logo-grid::before { top: 0; bottom: 0; left: 50%; transform: translateX(-50%); width: 5px; }
+  .logo-grid::after { left: 0; right: 0; top: 50%; transform: translateY(-50%); height: 5px; }
+
+  /* ── Spinner ── */
+  #spinner-wrap {
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    width: 40px; height: 40px;
+    position: relative;
+  }
+  #spinner-wrap.show { opacity: 1; }
+  #spinner-canvas { position: absolute; top: 0; left: 0; }
+</style>
+</head>
+<body>
+
+<div id="bsod">
+  <span class="emoji">:(</span>
+  <h1>Auf Ihrem PC ist ein Problem aufgetreten.<br>Er muss neu gestartet werden.</h1>
+  <p>Wir erfassen nur einige Fehlerinformationen, und dann<br>starten wir den Computer für Sie neu.</p>
+  <p id="stop-code">Weitere Informationen zu diesem Fehler finden Sie heir:<br>
+  <strong id="error-code">INTERNAL_SYSTEM_ERROR</strong></p>
+  <div id="progress-label">0% abgeschlossen</div>
+  <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+</div>
+
+<div id="blackscreen"></div>
+
+<div id="boot-screen">
+  <div class="win11-logo" id="winlogo"><div class="logo-grid"></div></div>
+  <div id="spinner-wrap">
+    <canvas id="spinner-canvas" width="40" height="40"></canvas>
+  </div>
+</div>
+
+<script>
+  const goFS = () => document.documentElement.requestFullscreen?.().catch(()=>{});
+  document.addEventListener('click', goFS, { once: true });
+  goFS();
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ══════════════════════════════════════════════
+  // WINDOWS CIRCULAR SPINNER
+  // ══════════════════════════════════════════════
+  const spinCanvas = document.getElementById('spinner-canvas');
+  const spinCtx = spinCanvas.getContext('2d');
+  const SW = 40, SH = 40, SCX = SW / 2, SCY = SH / 2;
+  const SPIN_RADIUS = 15;
+  const TRACK_WIDTH = 4.5;
+  const SPIN_SPEED = 1.1;
+
+  const SWEEP_MAX = Math.PI * 1.7;
+  const SWEEP_MIN = Math.PI * 0.18;
+  const SWEEP_CYCLE = 1.6;
+
+  let spinActive = false;
+  let spinRaf = null;
+  let spinLastTs = null;
+  let spinAngle = -Math.PI / 2;
+  let spinTime = 0;
+
+  function drawSpinner() {
+    spinCtx.clearRect(0, 0, SW, SH);
+    const sweepT = (Math.sin(spinTime / SWEEP_CYCLE * 2 * Math.PI) + 1) / 2;
+    const sweep = SWEEP_MAX - sweepT * (SWEEP_MAX - SWEEP_MIN);
+    const headAngle = spinAngle;
+    const tailAngle = headAngle - sweep;
+    spinCtx.beginPath();
+    spinCtx.arc(SCX, SCY, SPIN_RADIUS, tailAngle, headAngle);
+    spinCtx.strokeStyle = 'rgba(255,255,255,1)';
+    spinCtx.lineWidth = TRACK_WIDTH;
+    spinCtx.lineCap = 'round';
+    spinCtx.stroke();
+  }
+
+  function tickSpinner(ts) {
+    if (!spinActive) return;
+    if (spinLastTs === null) spinLastTs = ts;
+    const dt = Math.min((ts - spinLastTs) / 1000, 0.05);
+    spinLastTs = ts;
+    spinAngle += SPIN_SPEED * 2 * Math.PI * dt;
+    spinTime  += dt;
+    drawSpinner();
+    spinRaf = requestAnimationFrame(tickSpinner);
+  }
+
+  function startSpinner() {
+    spinActive = true;
+    spinLastTs = null;
+    spinAngle = -Math.PI / 2;
+    spinTime = 0;
+    spinRaf = requestAnimationFrame(tickSpinner);
+  }
+
+  function stopSpinner() {
+    spinActive = false;
+    if (spinRaf) { cancelAnimationFrame(spinRaf); spinRaf = null; }
+    spinCtx.clearRect(0, 0, SW, SH);
+  }
+
+  // ══════════════════════════════════════════════
+  // BSOD PROGRESS
+  // ══════════════════════════════════════════════
+  function animateProgress(bar, label) {
+    return new Promise(resolve => {
+      let pct = 0;
+      const stages = [
+        { to: 14, speed: 85 }, { to: 28, speed: 125 }, { to: 33, speed: 230 },
+        { to: 64, speed: 52 }, { to: 78, speed: 260 }, { to: 91, speed: 95 }, { to: 100, speed: 38 },
+      ];
+      let si = 0;
+      function tick() {
+        if (pct >= 100) {
+          label.textContent = '100% abgeschlossen';
+          bar.style.width = '100%';
+          setTimeout(resolve, 1100);
+          return;
+        }
+        const s = stages[si] || stages[stages.length - 1];
+        if (pct < s.to) {
+          pct++;
+          bar.style.width = pct + '%';
+          label.textContent = pct + '% abgeschlossen';
+          setTimeout(tick, s.speed + Math.random() * 30);
+        } else { si++; setTimeout(tick, s.speed * 2 + Math.random() * 80); }
+      }
+      tick();
+    });
+  }
+
+  // ══════════════════════════════════════════════
+  // MAIN LOOP
+  // ══════════════════════════════════════════════
+  async function runLoop() {
+    const bsod   = document.getElementById('bsod');
+    const bar    = document.getElementById('progress-bar');
+    const label  = document.getElementById('progress-label');
+    const black  = document.getElementById('blackscreen');
+    const boot   = document.getElementById('boot-screen');
+    const logo   = document.getElementById('winlogo');
+    const spWrap = document.getElementById('spinner-wrap');
+
+    while (true) {
+      bar.style.transition = 'none';
+      bar.style.width = '0%';
+      label.textContent = '0% abgeschlossen';
+
+      bsod.style.opacity = '0';
+      bsod.style.filter = 'brightness(4)';
+      bsod.style.transition = 'none';
+      bsod.style.display = 'flex';
+      await sleep(20);
+      bsod.style.transition = 'opacity 0.12s, filter 0.22s';
+      bsod.style.opacity = '1';
+      bsod.style.filter = 'brightness(1)';
+      await animateProgress(bar, label);
+
+      bsod.style.display = 'none';
+      black.style.display = 'block';
+      await sleep(3000); // 3 Sekunden schwarzer Bildschirm nach BSOD
+      black.style.display = 'none';
+
+      stopSpinner();
+      logo.classList.remove('show');
+      spWrap.classList.remove('show');
+      boot.style.opacity = '1';
+      boot.style.transition = 'none';
+      boot.style.display = 'flex';
+      await sleep(180);
+      logo.classList.add('show');
+      await sleep(380);
+      startSpinner();
+      spWrap.classList.add('show');
+      await sleep(5000 + Math.random() * 800);
+
+      stopSpinner();
+      spWrap.classList.remove('show');
+      logo.classList.remove('show');
+      await sleep(280);
+      boot.style.transition = 'opacity 0.3s';
+      boot.style.opacity = '0';
+      await sleep(320);
+      boot.style.display = 'none';
+
+      black.style.display = 'block';
+      await sleep(360 + Math.random() * 260);
+      black.style.display = 'none';
+    }
+  }
+
+  runLoop();
+</script>
+</body>
+</html>
